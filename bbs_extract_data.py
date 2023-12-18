@@ -5,7 +5,6 @@ from awsglue.context import GlueContext
 from awsglue.transforms import *
 from awsglue.job import Job
 from pyspark.context import SparkContext
-from datetime import datetime, timedelta
 glue_client = boto3.client('glue')
 sc = SparkContext()
 sc._conf.set("spark.driver.maxResultSize", "16g")
@@ -16,6 +15,7 @@ job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
 bucket_name = "adh-bag-comparison-scripts-us-east-1-039628302096"
+
 
 def delete_folders_s3(bucket_name, prefix):
     try:
@@ -29,38 +29,8 @@ def delete_folders_s3(bucket_name, prefix):
         raise e
 
 
-def is_in_range(upserttime):
-  utc_time = datetime.strptime(upserttime, "%Y-%m-%dT%H:%M:%S.%fZ")
-  yesterday = datetime.utcnow().date() - timedelta(days=1)
-  start_of_day = datetime(yesterday.year, yesterday.month, yesterday.day)
-  end_of_day = start_of_day + timedelta(days=1)
-  return start_of_day <= utc_time < end_of_day
-
-
-def filter_function(record):
-  timestamp = record["upsertTimestamp"]
-  if is_in_range(timestamp):
-    print(timestamp)
-    return True
-  else: 
-    return False
-
-# Filter the DynamicFrame
-mapping = [
-    ("sk","string", "sk","string"),
-    ("pk","string", "pk","string"),
-    ("scanResponse","string", "scanResponse","string"),
-    ("upsertTimestamp","string", "upsertTimestamp","string"),
-    ("scanRequest","string", "scanRequest","string"),
-    ("bmRequest", "string", "bmRequest", "string"),
-    ("bmResponse", "string", "bmResponse", "string"),
-    ("bmPayload", "string", "bmPayload", "string"),
-    ("cepPayload", "string", "cepPayload", "string")
-]
-
-
 try:
-    # deleting 
+    # deleting existing folders
     paths_to_delete = ["temporary/", "dynamo_data/", "bmResponse.parquet/", "scanResponse.parquet/"]
     for path in paths_to_delete:
         delete_folders_s3(bucket_name,path)
@@ -78,24 +48,40 @@ try:
     )
 
        
-    filter = Filter.apply(frame = AmazonDynamoDB_node1701918537261, f = filter_function, transformation_ctx = "filter")
-    applymapping2 = ApplyMapping.apply(frame = filter, mappings=mapping, transformation_ctx = "applymapping2")
+    def sparkSqlQuery(glueContext, query, mapping, transformation_ctx) -> DynamicFrame:
+        for alias, frame in mapping.items():
+            frame.toDF().createOrReplaceTempView(alias)
+        result = spark.sql(query)
+        return DynamicFrame.fromDF(result, glueContext, transformation_ctx)
     
+
+    SqlQuery0 = """
+      SELECT *
+          FROM myDataSource
+          WHERE CAST(upsertTimestamp AS TIMESTAMP) BETWEEN 
+              CAST(DATE_SUB(CURRENT_DATE(), 1) AS TIMESTAMP) AND 
+              CAST(DATE_SUB(CURRENT_DATE(), 1) AS TIMESTAMP) + INTERVAL 1 DAY
+        """
+
+    SQLQuery_node1702922733035 = sparkSqlQuery(
+        glueContext,
+        query=SqlQuery0,
+        mapping={"myDataSource": AmazonDynamoDB_node1701918537261},
+        transformation_ctx="SQLQuery_node1702922733035",
+    )
     
     AmazonS3_node1701138180579 = glueContext.write_dynamic_frame.from_options(
-        frame=applymapping2,
+        frame=SQLQuery_node1702922733035,
         connection_type="s3",
         format="glueparquet",
         connection_options={"path": f"s3://{bucket_name}/dynamo_data/", "partitionKeys": []},
         format_options={"compression": "snappy"},
         transformation_ctx="AmazonS3_node1701138180579",
     )
+    
   # Invoke Glue Jobs
     bm_cep_response = glue_client.start_job_run(JobName="scan_bm_response_conversion")
     payload_response = glue_client.start_job_run(JobName="cep_bm_payload_conversion")
-
-    pandas_df = applymapping2.toDF.toPandas()
-    pandas_df.to_csv(f"s3://{bucket_name}/dynamo_csv_data.csv", index=False)
 
 
 except Exception as e:
