@@ -9,6 +9,7 @@ from pyspark.sql.types import  StringType, MapType
 from pyspark.sql.functions import udf
 from awsglue.transforms import *
 
+bucket_name = "adh-bag-comparison-scripts-us-east-1-039628302096"
 
 def scan_response(data):
     try:
@@ -415,7 +416,7 @@ try:
     print("Final ROws", scan_df.count())
     scan_df = scan_df.select(*[col("parsed_response").getItem(key).alias(key) for key in scan_keys])
     scan_df = scan_df.drop("parsed_response")
-    scan_df.write.parquet("s3a://adh-bag-comparison-scripts-us-east-1-039628302096/scanResponse.parquet",mode="overwrite")
+    scan_df.write.parquet(f"s3a://{bucket_name}/scanResponse.parquet",mode="overwrite")
 
     # # bm Response
     bm_keys = list(bm_response({}).keys())
@@ -428,7 +429,14 @@ try:
     bm_df = bm_df.filter(bm_df.parsed_response.isNotNull())
     bm_df = bm_df.select(*[col("parsed_response").getItem(key).alias(key) for key in bm_keys])
     bm_df = bm_df.drop("parsed_response")
-    bm_df.write.parquet("s3a://adh-bag-comparison-scripts-us-east-1-039628302096/bmResponse.parquet",mode="overwrite")
+    bm_df.write.parquet(f"s3a://{bucket_name}/bmResponse.parquet",mode="overwrite")
+
+
+    scan_df.createOrReplaceTempView("scan")
+    bm_df.createOrReplaceTempView("bm")
+
+    scan_bm_sql_query = glueContext.read.text(f"s3a://{bucket_name}/scan_bm_sql_query.sql").collect()[0][0]
+    final_scan_df = glueContext.sql(scan_bm_sql_query)
 
 except Exception as e:
     print(e)
